@@ -1,6 +1,7 @@
 # test_attack.py
 from scapy.all import IP, TCP, send, Raw
 import time
+import subprocess  # 新增：用于执行系统 curl 命令
 import config   
 
 LEARNING_WAIT = config.BASELINE_LEARNING_TIME + 5
@@ -45,7 +46,6 @@ def test_scan():
     print("[*] 测试 端口扫描（扫描55个端口）...")
     ports = list(range(1, 56))  
     for i, port in enumerate(ports):
-        # 修改点：将 127.0.0.1 改为 8.8.8.8，确保所有平台的物理/虚拟网卡都能准确抓捕流量
         pkt = IP(dst="8.8.8.8") / TCP(dport=port, flags="S")
         send(pkt, verbose=False)
         time.sleep(0.02)
@@ -98,58 +98,73 @@ def test_session_duration():
     dst_ip = "8.8.8.8"
     dst_port = 80
     
-    # 1. 发送 SYN 包
     print("   发送 SYN 包...")
     pkt = IP(src=src_ip, dst=dst_ip) / TCP(dport=dst_port, flags="S")
     send(pkt, verbose=False)
     
-    # 2. 等待 15 秒（超过阈值 10 秒）
     print("   等待 15 秒...")
     time.sleep(15)
     
-    # 3. 发送 FIN 包关闭连接
     print("   发送 FIN 包...")
     pkt = IP(src=src_ip, dst=dst_ip) / TCP(dport=dst_port, flags="F")
     send(pkt, verbose=False)
     
     print("[✓] 会话时长测试完成，请等待告警")
 
+# ==================== 新增：10. TLS 恶意 SNI 域名请求测试 ====================
+def test_tls():
+    print("[*] 测试 TLS 恶意域名/SNI检测 (curl.exe -vk https://ngrok.io)...")
+    try:
+        # 设置超时时间，避免因网络连不通而卡住
+        cmd = ["curl.exe", "-vk", "https://ngrok.io"]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
+        print("[✓] TLS 测试请求已发出！")
+    except subprocess.TimeoutExpired:
+        print("[✓] TLS 请求已发出 (握手已完成/响应超时)")
+    except Exception as e:
+        print(f"[!] 执行 curl 失败，请检查系统是否有 curl 命令: {e}")
+# ========================================================================
+
 def test_all():
     print("\n" + "="*50)
     print("开始测试所有功能（学习期结束后）")
     print("="*50 + "\n")
 
-    print("【1/8】特征匹配 - SQL注入")
+    print("【1/9】特征匹配 - SQL注入")
     test_sql_injection()
     time.sleep(0.5)
     
-    print("\n【2/8】特征匹配 - XSS")
+    print("\n【2/9】特征匹配 - XSS")
     test_xss()
     time.sleep(0.5)
     
-    print("\n【3/8】特征匹配 - 命令执行")
+    print("\n【3/9】特征匹配 - 命令执行")
     test_cmd_exec()
     time.sleep(0.5)
     
-    print("\n【4/8】异常行为 - 暴力破解")
+    print("\n【4/9】异常行为 - 暴力破解")
     test_bruteforce()
     time.sleep(2)  
     
-    print("\n【5/8】异常行为 - 端口扫描")
+    print("\n【5/9】异常行为 - 端口扫描")
     test_scan()
     time.sleep(2)
     
-    print("\n【6/8】异常行为 - 横向扩散")
+    print("\n【6/9】异常行为 - 横向扩散")
     test_lateral_movement()
     time.sleep(2)
     
-    print("\n【7/8】异常行为 - 异常外联")
+    print("\n【7/9】异常行为 - 异常外联")
     test_external()
     time.sleep(2)
     
-    print("\n【8/8】异常行为 - 带宽异常")
+    print("\n【8/9】异常行为 - 带宽异常")
     test_bandwidth()
     time.sleep(5)
+
+    print("\n【9/9】TLS恶意域名检测 - ngrok.io")
+    test_tls()
+    time.sleep(2)
     
     print("\n" + "="*50)
     print("✅ 所有测试完成！")
@@ -170,9 +185,10 @@ if __name__ == "__main__":
     print("7. 异常外联 (异常行为)")
     print("8. 带宽异常 (异常行为)")
     print("9. 会话时长 (需修改配置，演示)")
+    print("10. TLS 恶意域名检测 (ngrok.io)")  # 新增选项
     print("0. 全部测试 (推荐)")
 
-    choice = input("\n请选择 (0-9): ")
+    choice = input("\n请选择 (0-10): ")
 
     if choice != '9':  
         wait_for_learning()
@@ -195,6 +211,8 @@ if __name__ == "__main__":
         test_bandwidth()
     elif choice == "9":
         test_session_duration()
+    elif choice == "10":      # 新增分支
+        test_tls()
     elif choice == "0":
         test_all()
     else:

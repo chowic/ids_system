@@ -62,5 +62,6 @@ class AlertManager:
         trojan = sum(1 for a in self.alerts if '木马' in a['type'] or '后门' in a['type'])
         lateral = sum(1 for a in self.alerts if '横向扩散' in a['type'])
         bandwidth = sum(1 for a in self.alerts if '带宽异常' in a['type'])
+        tls = sum(1 for a in self.alerts if 'TLS' in a['type']) # <--- 新增 TLS 统计
         return {'total': total, 'scan': scan, 'brute': brute, 'web': web, 
-            'trojan': trojan, 'lateral': lateral, 'bandwidth': bandwidth}
+            'trojan': trojan, 'lateral': lateral, 'bandwidth': bandwidth, 'tls': tls}

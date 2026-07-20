@@ -42,7 +42,10 @@ class AnomalyDetector:
                 self.start_learning()
             else:
                 print("[*] 使用固定阈值检测模式")
-
+    def detect_scan_and_brute(self, src_ip, dst_ip, dst_port, flags):
+        """端口扫描与暴力破解实时检测兜底接口"""
+        # 如果不需要实时独立检测，直接返回空列表 []
+        return []
     def start_learning(self):
         self.learning = True
         self.learning_start = time.time()

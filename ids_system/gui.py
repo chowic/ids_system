@@ -6,10 +6,11 @@ from datetime import datetime
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTableView, QHeaderView,
-    QStatusBar, QMessageBox, QFileDialog, QAbstractItemView
-)
+    QStatusBar, QMessageBox, QFileDialog, QAbstractItemView,
+    QTextEdit, QDialog, QDialogButtonBox)
+# 新增 pyqtSignal，解决抓包子线程直接更新 GUI 导致的崩溃问题
 from PyQt5.QtCore import (
-    Qt, QAbstractTableModel, QModelIndex, QTimer, QThread
+    Qt, QAbstractTableModel, QModelIndex, QTimer, QThread, pyqtSignal
 )
 from PyQt5.QtGui import QColor
 
@@ -36,7 +37,9 @@ class AlertTableModel(QAbstractTableModel):
             return str(value)
         elif role == Qt.TextColorRole:
             alert = self.alert_manager.alerts[index.row()]
-            if 'SQL' in alert['type'] or '命令' in alert['type'] or 'XSS' in alert['type']:
+            if 'TLS' in alert['type']:                        # <--- 新增 TLS 高亮显示 (深红色)
+                return QColor(220, 20, 60)
+            elif 'SQL' in alert['type'] or '命令' in alert['type'] or 'XSS' in alert['type']:
                 return QColor(255, 0, 0)      # 红色 - 严重
             elif '扫描' in alert['type']:
                 return QColor(255, 165, 0)    # 橙色 - 中等
@@ -85,19 +88,25 @@ class CaptureThread(QThread):
 
 
 class IDSGui(QMainWindow):
+    # 定义 Qt 信号，解决跨线程安全调用问题 (整合自前面的版本)
+    new_alert_signal = pyqtSignal(dict)
+
     def __init__(self, alert_manager):
         super().__init__()
         self.alert_manager = alert_manager
-        self.alert_manager.register_callback(self.on_new_alert)
+        
+        # 绑定 Qt 信号到主线程槽函数
+        self.new_alert_signal.connect(self.on_new_alert)
+        self.alert_manager.register_callback(lambda alert: self.new_alert_signal.emit(alert))
+        
         self.capture_thread = None
-        self.sig_detector = None   # 用于保存特征检测器实例，供热加载使用
+        self.sig_detector = None   
         self.init_ui()
 
     def init_ui(self):
         self.setWindowTitle('网络入侵检测系统 v1.0')
         self.setGeometry(100, 100, 1300, 700)
 
-        # 中央widget
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -122,7 +131,6 @@ class IDSGui(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_capture)
         self.stop_btn.setEnabled(False)
 
-        # ===== 新增：热加载按钮 =====
         self.reload_btn = QPushButton('🔄 重载特征')
         self.reload_btn.setStyleSheet(
             'QPushButton { background-color: #FFA500; color: white; '
@@ -136,10 +144,18 @@ class IDSGui(QMainWindow):
         
         self.export_btn = QPushButton('📤 导出日志')
         self.export_btn.clicked.connect(self.export_logs)
+         # ===== 攻击链按钮（新增） =====
+        self.chain_btn = QPushButton('🔗 攻击链')
+        self.chain_btn.clicked.connect(self.show_attack_chain)
         
         toolbar.addWidget(self.start_btn)
         toolbar.addWidget(self.stop_btn)
-        toolbar.addWidget(self.reload_btn)   # 加入工具栏
+        toolbar.addWidget(self.reload_btn)   
+        toolbar.addWidget(self.export_btn)
+        toolbar.addWidget(self.chain_btn)  # ← 添加这行
+        toolbar.addStretch()
+        toolbar.addWidget(self.start_btn)
+        toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.clear_btn)
         toolbar.addWidget(self.export_btn)
         toolbar.addStretch()
@@ -154,6 +170,10 @@ class IDSGui(QMainWindow):
         
         self.total_label = QLabel('📊 总告警: 0')
         self.total_label.setStyleSheet('font-weight: bold; font-size: 12px;')
+
+        # <--- 新增 TLS 统计标签 --->
+        self.tls_label = QLabel('🔒 TLS异常: 0')
+        self.tls_label.setStyleSheet('font-weight: bold; font-size: 12px; color: #DC143C;')
         
         self.scan_label = QLabel('🔍 端口扫描: 0')
         self.scan_label.setStyleSheet('font-weight: bold; font-size: 12px;')
@@ -174,6 +194,7 @@ class IDSGui(QMainWindow):
         self.bandwidth_label.setStyleSheet('font-weight: bold; font-size: 12px;')
         
         stats_layout.addWidget(self.total_label)
+        stats_layout.addWidget(self.tls_label)      # 加入布局
         stats_layout.addWidget(self.scan_label)
         stats_layout.addWidget(self.brute_label)
         stats_layout.addWidget(self.web_label)
@@ -195,13 +216,12 @@ class IDSGui(QMainWindow):
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         
         # 设置列宽
-        self.table_view.setColumnWidth(0, 50)    # ID
-        self.table_view.setColumnWidth(1, 160)   # 时间
-        self.table_view.setColumnWidth(2, 130)   # 源IP
-        self.table_view.setColumnWidth(3, 130)   # 目的IP
-        self.table_view.setColumnWidth(4, 60)    # 端口
-        self.table_view.setColumnWidth(5, 200)   # 告警类型
-        # 第6列 "详情" 自动拉伸
+        self.table_view.setColumnWidth(0, 50)    
+        self.table_view.setColumnWidth(1, 160)   
+        self.table_view.setColumnWidth(2, 130)   
+        self.table_view.setColumnWidth(3, 130)   
+        self.table_view.setColumnWidth(4, 60)    
+        self.table_view.setColumnWidth(5, 200)   
         
         layout.addWidget(self.table_view)
 
@@ -216,7 +236,6 @@ class IDSGui(QMainWindow):
         self.stats_timer.start(1000)
 
     def on_new_alert(self, alert):
-        """收到新告警时更新界面"""
         self.table_model.add_alert(alert)
         self.table_view.scrollToBottom()
         self.statusBar.showMessage(
@@ -225,9 +244,9 @@ class IDSGui(QMainWindow):
         )
 
     def update_stats(self):
-        """更新统计信息"""
         stats = self.alert_manager.get_stats()
         self.total_label.setText(f'📊 总告警: {stats["total"]}')
+        self.tls_label.setText(f'🔒 TLS异常: {stats.get("tls", 0)}') # <--- 更新 TLS 数量
         self.scan_label.setText(f'🔍 端口扫描: {stats["scan"]}')
         self.brute_label.setText(f'🔑 暴力破解: {stats["brute"]}')
         self.web_label.setText(f'🌐 Web攻击: {stats["web"]}')
@@ -241,7 +260,6 @@ class IDSGui(QMainWindow):
         from anomaly_detection import AnomalyDetector
         import config
 
-        # 检查特征库是否存在
         if not os.path.exists(config.SIGNATURE_FILE):
             QMessageBox.warning(
                 self, 
@@ -250,7 +268,6 @@ class IDSGui(QMainWindow):
             )
             return
 
-        # 加载特征库
         try:
             sig_detector = SignatureDetector(config.SIGNATURE_FILE)
             if len(sig_detector.signatures) == 0:
@@ -260,7 +277,6 @@ class IDSGui(QMainWindow):
             QMessageBox.critical(self, '错误', f'加载特征库失败: {e}')
             return
 
-        # 保存特征检测器实例供热加载使用
         self.sig_detector = sig_detector
 
         self.start_btn.setEnabled(False)
@@ -269,10 +285,8 @@ class IDSGui(QMainWindow):
         self.status_label.setStyleSheet('font-weight: bold; color: #4CAF50; padding: 5px;')
         self.statusBar.showMessage('正在抓包检测...')
 
-        # 初始化异常检测器
         anomaly_detector = AnomalyDetector()
 
-        # 创建并启动抓包线程
         self.capture_thread = CaptureThread(
             sig_detector, 
             anomaly_detector, 
@@ -295,7 +309,6 @@ class IDSGui(QMainWindow):
         self.status_label.setStyleSheet('font-weight: bold; color: #666; padding: 5px;')
         self.statusBar.showMessage('检测已停止', 2000)
 
-    # ===== 新增：热加载特征 =====
     def reload_signatures(self):
         if self.sig_detector is None:
             QMessageBox.information(self, '提示', '请先启动检测（加载特征库）再重载，或直接点击开始检测。')
@@ -352,3 +365,34 @@ class IDSGui(QMainWindow):
                 self.statusBar.showMessage(f'日志已导出: {file_path}', 3000)
             except Exception as e:
                 QMessageBox.critical(self, '错误', f'导出失败: {e}')
+        # ===== 攻击链分析 =====
+    def show_attack_chain(self):
+        from attack_chain import AttackChainAnalyzer, format_chain
+        analyzer = AttackChainAnalyzer(self.alert_manager)
+        summary = analyzer.get_summary()
+
+        if summary['total'] == 0:
+            QMessageBox.information(self, '提示', '暂无攻击链数据')
+            return
+
+        lines = []
+        lines.append("=" * 60)
+        lines.append(f"共 {summary['total']} 条攻击链")
+        lines.append(f"高危: {summary['high']}  中危: {summary['medium']}  低危: {summary['low']}")
+        lines.append("=" * 60)
+
+        for chain in summary['chains']:
+            lines.append(format_chain(chain))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("攻击链分析")
+        dialog.resize(800, 500)
+        layout = QVBoxLayout(dialog)
+        text = QTextEdit()
+        text.setFontFamily("monospace")
+        text.setPlainText("\n".join(lines))
+        layout.addWidget(text)
+        btn = QDialogButtonBox(QDialogButtonBox.Ok)
+        btn.accepted.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec_()
