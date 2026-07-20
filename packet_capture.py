@@ -1,10 +1,11 @@
 # packet_capture.py
-from scapy.all import sniff, IP, TCP, UDP
-from scapy.packet import Raw
+import sys
 import time
+from scapy.all import sniff, IP, TCP, UDP, conf
 import config
 from tls_detector import TLSDetector
-
+# packet_capture.py 顶部
+from scapy.all import sniff, IP, IPv6, TCP, UDP, conf
 
 class PacketCapture:
     def __init__(self, sig_detector, anomaly_detector, alert_manager):
@@ -20,22 +21,21 @@ class PacketCapture:
         self.bandwidth_alerted_ips = set()
 
     def packet_callback(self, pkt):
-        # ===== 调试：打印所有 TCP 包 =====
-        if pkt.haslayer(TCP) and pkt.haslayer(IP):
-            tcp_layer = pkt[TCP]
-            payload = bytes(tcp_layer.payload) if tcp_layer.payload else b''
-            if payload and len(payload) > 0:
-                print(f"[抓包] {pkt[IP].src}:{tcp_layer.sport} -> {pkt[IP].dst}:{tcp_layer.dport} 长度:{len(payload)} 前5字节:{payload[:5].hex()}")
-
         if not self.running:
             return
 
         self.packet_count += 1
 
-        if not pkt.haslayer(IP):
+        # 兼容 IPv4 和 IPv6 两种数据包
+        if not (pkt.haslayer(IP) or pkt.haslayer(IPv6)):
             return
 
-        ip_layer = pkt[IP]
+     # 提取源 IP 和目的 IP
+        if pkt.haslayer(IP):
+            ip_layer = pkt[IP]
+        else:
+            ip_layer = pkt[IPv6]
+            
         src_ip = ip_layer.src
         dst_ip = ip_layer.dst
         pkt_size = len(pkt)
@@ -55,8 +55,10 @@ class PacketCapture:
             payload = bytes(tcp_layer.payload) if tcp_layer.payload else b''
             flags = str(tcp_layer.flags)
 
+            # 1. TLS 恶意检测
             is_malicious, alert_info = self.tls_detector.detect(pkt, src_ip, dst_ip, dst_port)
             if is_malicious and alert_info:
+                print(f"[🚨 TLS 告警触发] {alert_info['type']} -> {alert_info['detail']}")
                 self.alert_manager.add_alert(
                     alert_info['src_ip'],
                     alert_info['dst_ip'],
@@ -64,12 +66,13 @@ class PacketCapture:
                     alert_info['type'],
                     alert_info['detail']
                 )
-                return
 
+            # 2. 端口扫描与暴力破解检测
             anomalies = self.anomaly_detector.detect_scan_and_brute(src_ip, dst_ip, dst_port, flags)
             for anomaly_type, detail in anomalies:
                 self.alert_manager.add_alert(src_ip, dst_ip, dst_port, anomaly_type, detail)
 
+            # 3. 签名特征检测
             if payload and len(payload) > 0:
                 matches = self.sig_detector.detect(payload)
                 for name, pattern in matches:
@@ -79,6 +82,7 @@ class PacketCapture:
                         f"匹配特征: {pattern[:50]}"
                     )
 
+            # 4. 统计更新与其它异常检测
             self.anomaly_detector.update_stats(
                 src_ip, dst_ip, dst_port, payload,
                 pkt_size=pkt_size,
@@ -125,23 +129,56 @@ class PacketCapture:
                     '异常行为: 带宽异常',
                     f'{ip} 在5秒内传输 {bytes_count/1024/1024:.2f} MB 数据'
                 )
-                print(f"[带宽告警] {ip} 在5秒内传输 {bytes_count/1024/1024:.2f} MB")
 
                 if len(self.bandwidth_alerted_ips) > 1000:
                     self.bandwidth_alerted_ips = set()
 
-    def start(self, iface="lo", filter_str=""):
+    # packet_capture.py 中的 start 方法替换如下：
+
+    def start(self, iface=None, filter_str=""):
+        """全平台兼容且自动识别真实网卡的抓包逻辑"""
         self.running = True
-        print(f"[*] 开始抓包 (接口: {iface}, 过滤: {filter_str})...")
-        print(f"[*] 带宽阈值: {config.BANDWIDTH_THRESHOLD/1024/1024:.0f} MB/5秒")
-        print(f"[*] 扫描阈值: {config.SCAN_THRESHOLD} 次/{config.STATS_WINDOW}秒")
-        print(f"[*] 暴力破解阈值: {config.BRUTE_FORCE_THRESHOLD} 次/{config.STATS_WINDOW}秒")
+        
+        selected_iface = iface
+
+        # 如果是 Windows，自动寻找有真实 IPv4 地址的活跃网卡（避开 VMware/Loopback）
+        if sys.platform == "win32" and (selected_iface is None or selected_iface == "lo"):
+            try:
+                from scapy.arch.windows import get_windows_if_list
+                interfaces = get_windows_if_list()
+                
+                # 优先挑选含有真实 IP 且不是 VMware/Loopback 的网卡
+                for iface_info in interfaces:
+                    name = iface_info.get('name', '')
+                    description = iface_info.get('description', '')
+                    ips = iface_info.get('ips', [])
+                    
+                    # 避开 VMware 和 127.0.0.1
+                    if 'VMware' not in description and 'Loopback' not in description:
+                        # 查找包含类似 10.x.x.x 或 192.168.x.x 的局域网 IP 网卡
+                        for ip in ips:
+                            if ip.startswith('10.') or ip.startswith('192.168.') or ip.startswith('172.'):
+                                selected_iface = iface_info.get('win_name')
+                                print(f"[*] 自动锁定真实活动网卡: {description} (IP: {ip})")
+                                break
+                    if selected_iface and selected_iface != "lo":
+                        break
+            except Exception as e:
+                print(f"[!] 网卡筛选警告: {e}")
+
+        # 兜底处理
+        if selected_iface is None or selected_iface == "lo":
+            selected_iface = conf.iface
+
+        print(f"[*] 开始抓包 (接口: {selected_iface}, 系统: {sys.platform})...")
+        
         try:
-            sniff(iface=iface, filter=filter_str, prn=self.packet_callback, store=0)
+            sniff(iface=selected_iface, filter=filter_str, prn=self.packet_callback, store=0)
         except KeyboardInterrupt:
             print("[*] 用户中断抓包")
         except Exception as e:
             print(f"[!] 抓包错误: {e}")
+            print("[!] 提示: 请确保以“管理员身份”运行 PowerShell/CMD！")
         finally:
             self.running = False
             print(f"[*] 抓包停止，共处理 {self.packet_count} 个数据包")
