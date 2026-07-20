@@ -1,11 +1,11 @@
 # packet_capture.py
 import sys
 import time
-from scapy.all import sniff, IP, TCP, UDP, conf
 import config
 from tls_detector import TLSDetector
 # packet_capture.py 顶部
 from scapy.all import sniff, IP, IPv6, TCP, UDP, conf
+from scapy.packet import Raw
 
 class PacketCapture:
     def __init__(self, sig_detector, anomaly_detector, alert_manager):
@@ -19,6 +19,8 @@ class PacketCapture:
         self.traffic_stats = {}
         self.last_check_time = time.time()
         self.bandwidth_alerted_ips = set()
+        # 控制异常检查频率
+        self.last_anomaly_check_time = time.time()
 
     def packet_callback(self, pkt):
         if not self.running:
@@ -44,6 +46,28 @@ class PacketCapture:
         self.traffic_stats[dst_ip] = self.traffic_stats.get(dst_ip, 0) + pkt_size
 
         now = time.time()
+        # ==================== 【核心修改：学习期彻底闭嘴保护】 ====================
+        # 如果检测引擎当前处于学习期，我们只更新异常指标的统计，然后直接拦截，不走任何告警逻辑！
+        if hasattr(self.anomaly_detector, 'learning') and self.anomaly_detector.learning:
+            # 依然需要记录 TCP/UDP 的状态用于计算基线
+            if pkt.haslayer(TCP):
+                tcp_layer = pkt[TCP]
+                payload = bytes(tcp_layer.payload) if tcp_layer.payload else b''
+                flags = str(tcp_layer.flags)
+                self.anomaly_detector.update_stats(src_ip, dst_ip, tcp_layer.dport, payload, pkt_size=pkt_size, flags=flags)
+            elif pkt.haslayer(UDP):
+                udp_layer = pkt[UDP]
+                payload = bytes(udp_layer.payload) if udp_layer.payload else b''
+                self.anomaly_detector.update_stats(src_ip, dst_ip, udp_layer.dport, payload, pkt_size=pkt_size, flags='')
+            
+            # 定时触发学习期的数据采样收集（原版 10 秒调用一次，配合前述可调整为 3 秒）
+            if now - self.last_anomaly_check_time >= 3: 
+                self.anomaly_detector.check_anomalies()
+                self.last_anomaly_check_time = now
+            return  # <--- 关键：学习期在此直接拦截返回，后续的特征匹配和带宽告警全部不会被执行！
+        # =========================================================================
+
+        # 每5秒检查带宽 (学习期结束后的正常检测模式)
         if now - self.last_check_time >= 5:
             self.check_bandwidth_anomaly()
             self.last_check_time = now
@@ -106,6 +130,9 @@ class PacketCapture:
                 pkt_size=pkt_size,
                 flags=''
             )
+        # 每3秒进行一次异常检查（无论TCP/UDP，配合采样频率优化）
+        if now - self.last_anomaly_check_time >= 3:
+            
             anomalies = self.anomaly_detector.check_anomalies()
             for ano in anomalies:
                 self.alert_manager.add_alert(
@@ -113,8 +140,9 @@ class PacketCapture:
                     f"异常行为: {ano['type']}",
                     ano['detail']
                 )
-
+            self.last_anomaly_check_time = now
     def check_bandwidth_anomaly(self):
+        """带宽异常检测"""
         for ip, bytes_count in self.traffic_stats.items():
             if bytes_count > config.BANDWIDTH_THRESHOLD:
                 alert_key = f"{ip}_{int(time.time()/60)}"
@@ -127,7 +155,7 @@ class PacketCapture:
                     '网络',
                     0,
                     '异常行为: 带宽异常',
-                    f'{ip} 在5秒内传输 {bytes_count/1024/1024:.2f} MB 数据'
+                    f'{ip} 在5秒内传输数据超过阈值'
                 )
 
                 if len(self.bandwidth_alerted_ips) > 1000:

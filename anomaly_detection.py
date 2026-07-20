@@ -1,36 +1,80 @@
 # anomaly_detection.py
 import time
+import threading
 from collections import defaultdict
 import config
-
+import json
+import os
 
 class AnomalyDetector:
     def __init__(self):
-        # 原有统计
-        # {src_ip: [timestamp, ...]}
-        self.conn_count = defaultdict(list)
-        self.fail_login_count = defaultdict(
-            list)     # {src_ip: [timestamp, ...]}
-        # {src_ip: [(dst_ip, timestamp), ...]}
-        self.external_connections = defaultdict(list)
-
-        # 新增：横向扩散检测
+        # 引入可重入锁，确保多事件并发时数据统计的安全性
+        self.lock = threading.RLock()
+        
+        # 原始统计（用于实时计数）
+        self.conn_count = defaultdict(list)           # {src_ip: [(dst_port, timestamp), ...]}
+        self.fail_login_count = defaultdict(list)     # {src_ip: [timestamp, ...]}
+        self.external_connections = defaultdict(list) # {src_ip: [(dst_ip, timestamp), ...]}
         self.lateral_movement = defaultdict(list)     # {src_ip: [dst_ip, ...]}
-
-        # 新增：会话时长检测
-        # {(src_ip, dst_ip, dst_port): start_time}
-        self.session_start = {}
-        self.session_duration = defaultdict(
-            list)     # {src_ip: [duration, ...]}
-
-        # 新增：扫描检测统计（用于 detect_scan_and_brute）
-        # {(src_ip, dst_ip): set(ports)}
-        self.scan_stats = defaultdict(set)
+        self.session_start = {}                       # {(src_ip, dst_ip, dst_port): start_time}
+        self.session_duration = defaultdict(list)     # {src_ip: [duration, ...]}
 
         self.last_clean_time = time.time()
+        self.last_check_time = time.time()            # 控制检查频率
+
+        # ===== 基线相关 =====
+        self.baseline = {}            
+        self.learning = False
+        self.learning_start = 0
+        self.learning_data = None     
+        self.baseline_loaded = False
+
+        if config.USE_BASELINE and os.path.exists(config.BASELINE_FILE):
+            self.load_baseline()
+            if self.baseline:
+                self.baseline_loaded = True
+                print("[*] 基线已加载，使用基线检测模式")
+            else:
+                self.start_learning()
+        else:
+            if config.USE_BASELINE:
+                print("[*] 未找到基线文件，进入学习模式（60秒）")
+                self.start_learning()
+            else:
+                print("[*] 使用固定阈值检测模式")
+    def detect_scan_and_brute(self, src_ip, dst_ip, dst_port, flags):
+        """端口扫描与暴力破解实时检测兜底接口"""
+        # 如果不需要实时独立检测，直接返回空列表 []
+        return []
+    def start_learning(self):
+        self.learning = True
+        self.learning_start = time.time()
+        self.learning_data = {
+            'conn': defaultdict(list),
+            'fail': defaultdict(list),
+            'lateral': defaultdict(list),
+            'external': defaultdict(list)
+        }
+        print("[*] 开始学习网络正常行为，将持续 {} 秒".format(config.BASELINE_LEARNING_TIME))
+
+    def load_baseline(self):
+        try:
+            with open(config.BASELINE_FILE, 'r') as f:
+                self.baseline = json.load(f)
+        except Exception as e:
+            print(f"[!] 加载基线失败: {e}")
+            self.baseline = {}
+
+    def save_baseline(self):
+        try:
+            os.makedirs(os.path.dirname(config.BASELINE_FILE), exist_ok=True)
+            with open(config.BASELINE_FILE, 'w') as f:
+                json.dump(self.baseline, f, indent=2)
+            print(f"[*] 基线已保存至 {config.BASELINE_FILE}")
+        except Exception as e:
+            print(f"[!] 保存基线失败: {e}")
 
     def _is_internal(self, ip):
-        """判断是否为内网IP"""
         if ip.startswith('192.168.') or ip.startswith('10.'):
             return True
         if ip.startswith('172.16.') or ip.startswith('172.17.'):
@@ -39,160 +83,241 @@ class AnomalyDetector:
             return True
         if ip.startswith('172.2') or ip.startswith('172.3'):
             return True
-        if ip.startswith('127.'):  # localhost
+        if ip.startswith('127.'):
             return True
         return False
 
-    # ========== 新增方法 ==========
-    def detect_scan_and_brute(self, src_ip, dst_ip, dst_port, flags):
-        """
-        实时检测端口扫描和暴力破解
-        返回: [(anomaly_type, detail), ...]
-        """
-        anomalies = []
-        now = time.time()
-        cutoff = now - config.STATS_WINDOW
+    def update_stats(self, src_ip, dst_ip, dst_port, payload, pkt_size=0, flags=''):
+        # 加入线程锁保护
+        with self.lock:
+            now = time.time()
 
-        # 1. 检测端口扫描：统计源IP访问的不同端口数
-        scan_key = (src_ip, dst_ip)
-        self.scan_stats[scan_key].add(dst_port)
+            # 1. 连接与端口统计
+            self.conn_count[src_ip].append((dst_port, now))
 
-        # 如果短时间内访问了超过阈值的不同端口，视为扫描
-        if len(self.scan_stats[scan_key]) > config.SCAN_THRESHOLD:
-            anomalies.append((
-                "端口扫描",
-                f"{src_ip} 扫描了 {dst_ip} 的 {len(self.scan_stats[scan_key])} 个端口"
-            ))
-            # 清空避免重复告警
-            self.scan_stats[scan_key] = set()
+            # 2. 失败登录
+            if payload:
+                payload_lower = payload.lower()
+                if b'login failed' in payload_lower or b'failed password' in payload_lower or b'authentication failure' in payload_lower:
+                    self.fail_login_count[src_ip].append(now)
 
-        # 2. 检测暴力破解：统计失败登录次数
-        login_key = (src_ip, dst_ip)
-        # 注意：这里需要从 update_stats 中获取失败登录计数
-        # 我们使用 fail_login_count 中的数据
-        fail_count = len(
-            [t for t in self.fail_login_count[src_ip] if t > cutoff])
-        if fail_count > config.BRUTE_FORCE_THRESHOLD:
-            anomalies.append((
-                "暴力破解",
-                f"{src_ip} 对 {dst_ip} 进行了 {fail_count} 次失败登录"
-            ))
-            # 清空避免重复告警
-            self.fail_login_count[src_ip] = []
+            # 3. 异常外联
+            if not self._is_internal(dst_ip) and dst_ip not in config.WHITELIST_IPS:
+                self.external_connections[src_ip].append((dst_ip, now))
 
-        return anomalies
+            # 4. 横向扩散
+            if self._is_internal(src_ip) and self._is_internal(dst_ip) and src_ip != dst_ip:
+                self.lateral_movement[src_ip].append(dst_ip)
 
-    def update_stats(self, src_ip, dst_ip, dst_port,
-                     payload, pkt_size=0, flags=''):
-        """
-        更新统计信息
-        params:
-            src_ip: 源IP
-            dst_ip: 目的IP
-            dst_port: 目的端口
-            payload: TCP/UDP载荷
-            pkt_size: 数据包大小（字节）
-            flags: TCP标志位
-        """
-        now = time.time()
+            # 5. 会话时长
+            if flags:
+                session_key = (src_ip, dst_ip, dst_port)
+                if 'S' in flags and 'A' not in flags:
+                    self.session_start[session_key] = now
+                elif 'F' in flags or 'R' in flags:
+                    if session_key in self.session_start:
+                        duration = now - self.session_start[session_key]
+                        if duration > config.SESSION_DURATION_THRESHOLD:
+                            self.session_duration[src_ip].append(duration)
+                        del self.session_start[session_key]
 
-        # ========== 1. 连接统计（用于端口扫描检测） ==========
-        self.conn_count[src_ip].append(now)
-
-        # ========== 2. 失败登录检测（用于暴力破解检测） ==========
-        if payload:
-            payload_lower = payload.lower()
-            if b'login failed' in payload_lower or b'failed password' in payload_lower or b'authentication failure' in payload_lower:
-                self.fail_login_count[src_ip].append(now)
-
-        # ========== 3. 异常外联检测 ==========
-        if not self._is_internal(
-                dst_ip) and dst_ip not in config.WHITELIST_IPS:
-            self.external_connections[src_ip].append((dst_ip, now))
-
-        # ========== 4. 横向扩散检测（内网IP之间通信） ==========
-        if self._is_internal(src_ip) and self._is_internal(
-                dst_ip) and src_ip != dst_ip:
-            self.lateral_movement[src_ip].append(dst_ip)
-
-        # ========== 5. 会话时长检测（仅TCP有flags） ==========
-        if flags:
-            session_key = (src_ip, dst_ip, dst_port)
-            # SYN包（不含ACK）→ 会话开始
-            if 'S' in flags and 'A' not in flags:
-                self.session_start[session_key] = now
-            # FIN或RST包 → 会话结束
-            elif 'F' in flags or 'R' in flags:
-                if session_key in self.session_start:
-                    duration = now - self.session_start[session_key]
-                    if duration > config.SESSION_DURATION_THRESHOLD:
-                        self.session_duration[src_ip].append(duration)
-                    del self.session_start[session_key]
-
-        # 清理过期数据（每10秒执行一次）
-        if now - self.last_clean_time > 10:
-            self._clean_old_records()
-            self.last_clean_time = now
+            # 清理旧数据（每10秒）
+            if now - self.last_clean_time > 10:
+                self._clean_old_records()
+                self.last_clean_time = now
 
     def check_anomalies(self):
-        """检查所有异常行为，返回告警列表"""
-        anomalies = []
-        now = time.time()
+        # 加入线程锁保护
+        with self.lock:
+            now = time.time()
+            if now - self.last_check_time < 3:
+                return []
+            self.last_check_time = now
+
+            if self.learning:
+                if now - self.learning_start >= config.BASELINE_LEARNING_TIME:
+                    self._finish_learning()
+                    self.last_check_time = now
+                    return []
+                return self._handle_learning(now)
+            else:
+                return self._detect_anomalies(now)
+
+    def _handle_learning(self, now):
         cutoff = now - config.STATS_WINDOW
 
-        # ========== 1. 端口扫描检测 ==========
-        for ip, timestamps in self.conn_count.items():
-            count = len([t for t in timestamps if t > cutoff])
-            if count > config.SCAN_THRESHOLD:
-                anomalies.append({
-                    'src_ip': ip,
-                    'dst_ip': '多个目标',
-                    'type': '端口扫描',
-                    'detail': f'{ip} 在 {config.STATS_WINDOW}s 内发起 {count} 次连接'
-                })
+        for ip, port_records in list(self.conn_count.items()):
+            recent_records = [item for item in port_records if item[1] > cutoff]
+            unique_ports = set(port for port, t in recent_records)
+            count = len(unique_ports)
+            if count > 0:
+                self.learning_data['conn'][ip].append(count)
 
-        # ========== 2. 暴力破解检测 ==========
-        for ip, timestamps in self.fail_login_count.items():
+        for ip, timestamps in list(self.fail_login_count.items()):
             count = len([t for t in timestamps if t > cutoff])
-            if count > config.BRUTE_FORCE_THRESHOLD:
-                anomalies.append({
-                    'src_ip': ip,
-                    'dst_ip': '目标系统',
-                    'type': '暴力破解',
-                    'detail': f'{ip} 在 {config.STATS_WINDOW}s 内失败登录 {count} 次'
-                })
+            if count > 0:
+                self.learning_data['fail'][ip].append(count)
 
-        # ========== 3. 异常外联检测 ==========
-        for src_ip, dst_list in self.external_connections.items():
-            if dst_list:
-                # 获取最近窗口内的外联目标
-                recent_dsts = [d for d, t in dst_list if t > cutoff]
-                if recent_dsts:
-                    unique_dsts = set(recent_dsts)
+        for ip, dst_list in list(self.lateral_movement.items()):
+            count = len(set(dst_list))
+            if count > 0:
+                self.learning_data['lateral'][ip].append(count)
+
+        for ip, dst_list in list(self.external_connections.items()):
+            recent_dsts = [d for d, t in dst_list if t > cutoff]
+            count = len(set(recent_dsts))
+            if count > 0:
+                self.learning_data['external'][ip].append(count)
+
+        return []
+
+    def _finish_learning(self):
+        print("[*] 学习结束，计算基线...")
+        baseline = {'conn': {}, 'fail': {}, 'lateral': {}, 'external': {}}
+
+        for metric in ['conn', 'fail', 'lateral', 'external']:
+            data_dict = self.learning_data.get(metric, {})
+            for ip, values in data_dict.items():
+                if len(values) < 3:
+                    continue
+                mean = sum(values) / len(values)
+                variance = sum((x - mean) ** 2 for x in values) / len(values)
+                std = variance ** 0.5 if variance > 0 else 0.1
+                baseline[metric][ip] = {'mean': mean, 'std': std}
+
+        self.baseline = baseline
+        self.save_baseline()
+        self.learning = False
+        self.learning_data = None
+        self.baseline_loaded = True
+        
+        self.conn_count.clear()
+        self.fail_login_count.clear()
+        self.external_connections.clear()
+        self.lateral_movement.clear()
+        self.session_duration.clear()
+        print("[*] 基线建立完成，切换到检测模式")
+
+    def _detect_anomalies(self, now):
+        anomalies = []
+        cutoff = now - config.STATS_WINDOW
+
+        # ===== 1. 端口扫描检测 =====
+        for ip, port_records in list(self.conn_count.items()):
+            recent_records = [item for item in port_records if item[1] > cutoff]
+            if not recent_records:
+                continue
+            
+            unique_ports = set(port for port, t in recent_records)
+            ports_count = len(unique_ports)
+
+            # 修改逻辑：以 config.SCAN_THRESHOLD 为绝对下限，消除背景流量造成的基线误报
+            if self.baseline_loaded and ip in self.baseline.get('conn', {}):
+                mean = self.baseline['conn'][ip]['mean']
+                std = self.baseline['conn'][ip]['std']
+                threshold = mean + 3 * std
+                if ports_count > threshold and ports_count > config.SCAN_THRESHOLD:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '多个目标',
+                        'type': '端口扫描',
+                        'detail': f'{ip} 在 {config.STATS_WINDOW}s 内探测了 {ports_count} 个不同端口 (基线均值{mean:.1f}, 阈值{threshold:.1f})'
+                    })
+                    self.conn_count[ip] = [] 
+            else:
+                if ports_count > config.SCAN_THRESHOLD:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '多个目标',
+                        'type': '端口扫描',
+                        'detail': f'{ip} 在 {config.STATS_WINDOW}s 内探测了 {ports_count} 个不同端口'
+                    })
+                    self.conn_count[ip] = []
+
+        # ===== 2. 暴力破解检测 =====
+        for ip, timestamps in list(self.fail_login_count.items()):
+            count = len([t for t in timestamps if t > cutoff])
+            if count == 0:
+                continue
+            if self.baseline_loaded and ip in self.baseline.get('fail', {}):
+                mean = self.baseline['fail'][ip]['mean']
+                std = self.baseline['fail'][ip]['std']
+                threshold = mean + 3 * std
+                if count > threshold and count > 3:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '目标系统',
+                        'type': '暴力破解',
+                        'detail': f'{ip} 在 {config.STATS_WINDOW}s 内失败登录 {count} 次 (基线均值{mean:.1f}, 阈值{threshold:.1f})'
+                    })
+                    self.fail_login_count[ip] = []
+            else:
+                if count > config.BRUTE_FORCE_THRESHOLD:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '目标系统',
+                        'type': '暴力破解',
+                        'detail': f'{ip} 在 {config.STATS_WINDOW}s 内失败登录 {count} 次'
+                    })
+                    self.fail_login_count[ip] = []
+
+        # ===== 3. 异常外联检测 =====
+        for src_ip, dst_list in list(self.external_connections.items()):
+            recent_dsts = [d for d, t in dst_list if t > cutoff]
+            if not recent_dsts:
+                continue
+            unique_dsts = set(recent_dsts)
+            outbound_count = len(unique_dsts)
+
+            if self.baseline_loaded and src_ip in self.baseline.get('external', {}):
+                mean = self.baseline['external'][src_ip]['mean']
+                std = self.baseline['external'][src_ip]['std']
+                threshold = mean + 3 * std
+                if outbound_count > threshold and outbound_count > 5:
                     anomalies.append({
                         'src_ip': src_ip,
-                        'dst_ip': list(unique_dsts)[0],
+                        'dst_ip': '外网多个IP',
                         'type': '异常外联',
-                        'detail': f'{src_ip} 外联陌生IP: {", ".join(list(unique_dsts)[:5])}'
+                        'detail': f'{src_ip} 在 {config.STATS_WINDOW}s 内外联 {outbound_count} 个IP (基线均值{mean:.1f}, 阈值{threshold:.1f})'
                     })
-                self.external_connections[src_ip] = []
+                    self.external_connections[src_ip] = []
+            else:
+                if outbound_count > 15:
+                    anomalies.append({
+                        'src_ip': src_ip,
+                        'dst_ip': '外网多个IP',
+                        'type': '异常外联',
+                        'detail': f'{src_ip} 在 {config.STATS_WINDOW}s 内访问了 {outbound_count} 个不同外网IP'
+                    })
+                    self.external_connections[src_ip] = []
 
-        # ========== 4. 横向扩散检测 ==========
-        for src_ip, dst_list in self.lateral_movement.items():
-            # 获取最近窗口内的目标
+        # ===== 4. 横向扩散检测 =====
+        for ip, dst_list in list(self.lateral_movement.items()):
             unique_targets = set(dst_list)
-            if len(unique_targets) > config.LATERAL_THRESHOLD:
-                anomalies.append({
-                    'src_ip': src_ip,
-                    'dst_ip': '内网多个目标',
-                    'type': '内网横向扩散',
-                    'detail': f'{src_ip} 在内网中访问了 {len(unique_targets)} 个不同的目标IP: {", ".join(list(unique_targets)[:5])}'
-                })
-                # 清空避免重复告警
-                self.lateral_movement[src_ip] = []
+            if self.baseline_loaded and ip in self.baseline.get('lateral', {}):
+                mean = self.baseline['lateral'][ip]['mean']
+                std = self.baseline['lateral'][ip]['std']
+                threshold = mean + 3 * std
+                if len(unique_targets) > threshold and len(unique_targets) > 3:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '内网多个目标',
+                        'type': '内网横向扩散',
+                        'detail': f'{ip} 在内网中访问了 {len(unique_targets)} 个不同的目标IP (基线均值{mean:.1f}, 阈值{threshold:.1f})'
+                    })
+                    self.lateral_movement[ip] = []
+            else:
+                if len(unique_targets) > config.LATERAL_THRESHOLD:
+                    anomalies.append({
+                        'src_ip': ip,
+                        'dst_ip': '内网多个目标',
+                        'type': '内网横向扩散',
+                        'detail': f'{ip} 在内网中访问了 {len(unique_targets)} 个不同的目标IP'
+                    })
+                    self.lateral_movement[ip] = []
 
-        # ========== 5. 会话时长异常检测 ==========
-        for ip, durations in self.session_duration.items():
+        # ===== 5. 会话时长异常 =====
+        for ip, durations in list(self.session_duration.items()):
             for duration in durations:
                 if duration > config.SESSION_DURATION_THRESHOLD:
                     anomalies.append({
@@ -201,49 +326,33 @@ class AnomalyDetector:
                         'type': '会话时长异常',
                         'detail': f'{ip} 存在会话时长 {duration/60:.1f} 分钟（超过阈值）'
                     })
-            # 清空已处理的记录
             self.session_duration[ip] = []
 
         return anomalies
 
     def _clean_old_records(self):
-        """清理过期的统计记录"""
         now = time.time()
         cutoff = now - config.STATS_WINDOW
 
-        # 清理连接统计
         for ip in list(self.conn_count.keys()):
-            self.conn_count[ip] = [
-                t for t in self.conn_count[ip] if t > cutoff]
+            self.conn_count[ip] = [item for item in self.conn_count[ip] if item[1] > cutoff]
             if not self.conn_count[ip]:
                 del self.conn_count[ip]
 
-        # 清理失败登录统计
         for ip in list(self.fail_login_count.keys()):
-            self.fail_login_count[ip] = [
-                t for t in self.fail_login_count[ip] if t > cutoff]
+            self.fail_login_count[ip] = [t for t in self.fail_login_count[ip] if t > cutoff]
             if not self.fail_login_count[ip]:
                 del self.fail_login_count[ip]
 
-        # 清理异常外联统计（保留最近的数据）
         for ip in list(self.external_connections.keys()):
-            self.external_connections[ip] = [
-                (d, t) for d, t in self.external_connections[ip] if t > cutoff]
+            self.external_connections[ip] = [(d, t) for d, t in self.external_connections[ip] if t > cutoff]
             if not self.external_connections[ip]:
                 del self.external_connections[ip]
 
-        # 清理横向扩散统计（只保留最新的）
         for ip in list(self.lateral_movement.keys()):
-            # 保留最近100条记录
             if len(self.lateral_movement[ip]) > 100:
                 self.lateral_movement[ip] = self.lateral_movement[ip][-100:]
 
-        # 清理会话开始记录（超过1小时的会话强制清除）
         for key, start_time in list(self.session_start.items()):
             if now - start_time > config.SESSION_DURATION_THRESHOLD:
                 del self.session_start[key]
-
-        # 清理扫描统计
-        for key in list(self.scan_stats.keys()):
-            # 扫描统计在 detect_scan_and_brute 中会自行清理
-            pass
