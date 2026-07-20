@@ -1,0 +1,52 @@
+# 攻击特征库（支持正则表达式）
+# 格式：攻击描述|特征模式
+# 若特征模式包含正则元字符，则按正则匹配；否则自动转义为普通字符串
+
+# ---- SQL注入 ----
+SQL注入 union select|union\s+select
+SQL注入 单引号OR|' OR '1'='1
+SQL注入 单引号OR注释|' OR 1=1--
+SQL注入 双引号OR|" OR "1"="1
+SQL注入 sleep|sleep\(
+SQL注入 benchmark|benchmark\(
+SQL注入 information_schema|information_schema
+SQL注入 堆叠查询|;\s*DROP\s+TABLE
+SQL注入 联合查询|UNION\s+ALL\s+SELECT
+
+# ---- XSS ----
+XSS script标签|<script[^>]*>.*?</script>
+XSS onerror|onerror\s*=
+XSS onload|onload\s*=
+XSS alert|alert\s*\(
+XSS img标签|<img[^>]*src\s*=
+XSS iframe|<iframe[^>]*src\s*=
+
+# ---- 命令执行 ----
+命令执行 cmd|cmd\.exe
+命令执行 shell|/bin/sh
+命令执行 系统文件|/etc/passwd
+命令执行 管道符|;\s*cat\s+/etc/passwd
+命令执行 管道符2|\|\s*whoami
+命令执行 管道符3|&&\s*id
+命令执行 系统命令|system\s*\(
+命令执行 执行函数|exec\s*\(
+
+# ---- WebShell/后门 ----
+WebShell 一句话木马|<\?php\s+eval\(\$_POST
+WebShell asp木马|<%\s*eval\s*request
+WebShell 大马|base64_decode\s*\(
+WebShell 命令参数|cmd\s*=
+WebShell shell参数|shell\s*=
+WebShell 文件管理|file_put_contents\s*\(
+木马 反弹shell|meterpreter
+木马 控制|beacon
+木马 远控|CobaltStrike
+后门 隐藏|backdoor
+后门 权限提升|privilege\s+escalation
+
+# ---- 其它常见攻击 ----
+暴力破解 失败登录|Login failed|Failed password|Authentication failure
+目录遍历|\.\./\.\./
+文件包含|include\s*\(
+任意文件读取|fopen\s*\(
+SSRF|curl\s*\(
