@@ -37,8 +37,10 @@ class AlertTableModel(QAbstractTableModel):
             return str(value)
         elif role == Qt.TextColorRole:
             alert = self.alert_manager.alerts[index.row()]
-            if 'TLS' in alert['type']:                        # <--- 新增 TLS 高亮显示 (深红色)
+            if 'TLS' in alert['type']:                        
                 return QColor(220, 20, 60)
+            elif 'AI' in alert['type']:                       # ========== [新增] AI 智能检测专属高亮 (深紫色) ==========
+                return QColor(103, 58, 183) 
             elif 'SQL' in alert['type'] or '命令' in alert['type'] or 'XSS' in alert['type']:
                 return QColor(255, 0, 0)      # 红色 - 严重
             elif '扫描' in alert['type']:
@@ -105,7 +107,7 @@ class IDSGui(QMainWindow):
 
     def init_ui(self):
         self.setWindowTitle('网络入侵检测系统 v1.0')
-        self.setGeometry(100, 100, 1300, 700)
+        self.setGeometry(100, 100, 1400, 700) # 稍微加宽一点以容纳更多面板
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -144,20 +146,17 @@ class IDSGui(QMainWindow):
         
         self.export_btn = QPushButton('📤 导出日志')
         self.export_btn.clicked.connect(self.export_logs)
-         # ===== 攻击链按钮（新增） =====
+        
+        # ===== 攻击链按钮 =====
         self.chain_btn = QPushButton('🔗 攻击链')
         self.chain_btn.clicked.connect(self.show_attack_chain)
         
         toolbar.addWidget(self.start_btn)
         toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.reload_btn)   
-        toolbar.addWidget(self.export_btn)
-        toolbar.addWidget(self.chain_btn)  # ← 添加这行
-        toolbar.addStretch()
-        toolbar.addWidget(self.start_btn)
-        toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.clear_btn)
         toolbar.addWidget(self.export_btn)
+        toolbar.addWidget(self.chain_btn)  
         toolbar.addStretch()
         
         self.status_label = QLabel('⏸ 状态: 未启动')
@@ -171,7 +170,6 @@ class IDSGui(QMainWindow):
         self.total_label = QLabel('📊 总告警: 0')
         self.total_label.setStyleSheet('font-weight: bold; font-size: 12px;')
 
-        # <--- 新增 TLS 统计标签 --->
         self.tls_label = QLabel('🔒 TLS异常: 0')
         self.tls_label.setStyleSheet('font-weight: bold; font-size: 12px; color: #DC143C;')
         
@@ -192,15 +190,20 @@ class IDSGui(QMainWindow):
 
         self.bandwidth_label = QLabel('📶 带宽异常: 0')
         self.bandwidth_label.setStyleSheet('font-weight: bold; font-size: 12px;')
+
+        # ========== [新增] AI 统计面板 ==========
+        self.ai_label = QLabel('🤖 AI/其他: 0')
+        self.ai_label.setStyleSheet('font-weight: bold; font-size: 12px; color: #673AB7;')
         
         stats_layout.addWidget(self.total_label)
-        stats_layout.addWidget(self.tls_label)      # 加入布局
+        stats_layout.addWidget(self.tls_label)      
         stats_layout.addWidget(self.scan_label)
         stats_layout.addWidget(self.brute_label)
         stats_layout.addWidget(self.web_label)
         stats_layout.addWidget(self.trojan_label)
         stats_layout.addWidget(self.lateral_label)
         stats_layout.addWidget(self.bandwidth_label)
+        stats_layout.addWidget(self.ai_label) # 加入布局
         stats_layout.addStretch()
         layout.addLayout(stats_layout)
 
@@ -215,7 +218,6 @@ class IDSGui(QMainWindow):
         self.table_view.horizontalHeader().setStretchLastSection(True)
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         
-        # 设置列宽
         self.table_view.setColumnWidth(0, 50)    
         self.table_view.setColumnWidth(1, 160)   
         self.table_view.setColumnWidth(2, 130)   
@@ -246,13 +248,14 @@ class IDSGui(QMainWindow):
     def update_stats(self):
         stats = self.alert_manager.get_stats()
         self.total_label.setText(f'📊 总告警: {stats["total"]}')
-        self.tls_label.setText(f'🔒 TLS异常: {stats.get("tls", 0)}') # <--- 更新 TLS 数量
+        self.tls_label.setText(f'🔒 TLS异常: {stats.get("tls", 0)}') 
         self.scan_label.setText(f'🔍 端口扫描: {stats["scan"]}')
         self.brute_label.setText(f'🔑 暴力破解: {stats["brute"]}')
         self.web_label.setText(f'🌐 Web攻击: {stats["web"]}')
         self.trojan_label.setText(f'🐴 木马/后门: {stats.get("trojan", 0)}')
         self.lateral_label.setText(f'🔄 横向扩散: {stats.get("lateral", 0)}')
         self.bandwidth_label.setText(f'📶 带宽异常: {stats.get("bandwidth", 0)}')
+        self.ai_label.setText(f'🤖 AI/其他: {stats.get("other", 0)}') # 更新 AI 数量
 
     def start_capture(self):
         from packet_capture import PacketCapture
@@ -365,7 +368,7 @@ class IDSGui(QMainWindow):
                 self.statusBar.showMessage(f'日志已导出: {file_path}', 3000)
             except Exception as e:
                 QMessageBox.critical(self, '错误', f'导出失败: {e}')
-        # ===== 攻击链分析 =====
+                
     def show_attack_chain(self):
         from attack_chain import AttackChainAnalyzer, format_chain
         analyzer = AttackChainAnalyzer(self.alert_manager)

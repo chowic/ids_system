@@ -1,10 +1,11 @@
-# anomaly_detection.py
+# anomaly_detector.py
 import time
 import threading
 from collections import defaultdict
 import config
 import json
 import os
+from ai_detector import AIDetector  # [新增] 导入你的 AI 模块
 
 class AnomalyDetector:
     def __init__(self):
@@ -18,6 +19,14 @@ class AnomalyDetector:
         self.lateral_movement = defaultdict(list)     # {src_ip: [dst_ip, ...]}
         self.session_start = {}                       # {(src_ip, dst_ip, dst_port): start_time}
         self.session_duration = defaultdict(list)     # {src_ip: [duration, ...]}
+
+        # ========== [新增] AI检测特征统计初始化 ==========
+        self.ai_detector = AIDetector()          
+        self.ip_packet_count = defaultdict(int)  
+        self.ip_bytes_count = defaultdict(int)   
+        self.ip_sessions = defaultdict(int)      
+        self.last_alert_time = {}  # 绝对防御机制：AI 防刷屏冷却时间戳
+        # ==================================================
 
         self.last_clean_time = time.time()
         self.last_check_time = time.time()            # 控制检查频率
@@ -42,10 +51,11 @@ class AnomalyDetector:
                 self.start_learning()
             else:
                 print("[*] 使用固定阈值检测模式")
+                
     def detect_scan_and_brute(self, src_ip, dst_ip, dst_port, flags):
         """端口扫描与暴力破解实时检测兜底接口"""
-        # 如果不需要实时独立检测，直接返回空列表 []
         return []
+        
     def start_learning(self):
         self.learning = True
         self.learning_start = time.time()
@@ -114,12 +124,18 @@ class AnomalyDetector:
                 session_key = (src_ip, dst_ip, dst_port)
                 if 'S' in flags and 'A' not in flags:
                     self.session_start[session_key] = now
+                    self.ip_sessions[src_ip] += 1  # [新增] 记录 AI 模块所需的会话数
                 elif 'F' in flags or 'R' in flags:
                     if session_key in self.session_start:
                         duration = now - self.session_start[session_key]
                         if duration > config.SESSION_DURATION_THRESHOLD:
                             self.session_duration[src_ip].append(duration)
                         del self.session_start[session_key]
+
+            # ========== [新增] 累加 AI 模块需要的基础特征 ==========
+            self.ip_packet_count[src_ip] += 1
+            self.ip_bytes_count[src_ip] += pkt_size
+            # ========================================================
 
             # 清理旧数据（每10秒）
             if now - self.last_clean_time > 10:
@@ -211,25 +227,20 @@ class AnomalyDetector:
             unique_ports = set(port for port, t in recent_records)
             ports_count = len(unique_ports)
 
-            # 修改逻辑：以 config.SCAN_THRESHOLD 为绝对下限，消除背景流量造成的基线误报
             if self.baseline_loaded and ip in self.baseline.get('conn', {}):
                 mean = self.baseline['conn'][ip]['mean']
                 std = self.baseline['conn'][ip]['std']
                 threshold = mean + 3 * std
                 if ports_count > threshold and ports_count > config.SCAN_THRESHOLD:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '多个目标',
-                        'type': '端口扫描',
+                        'src_ip': ip, 'dst_ip': '多个目标', 'type': '端口扫描',
                         'detail': f'{ip} 在 {config.STATS_WINDOW}s 内探测了 {ports_count} 个不同端口 (基线均值{mean:.1f}, 阈值{threshold:.1f})'
                     })
                     self.conn_count[ip] = [] 
             else:
                 if ports_count > config.SCAN_THRESHOLD:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '多个目标',
-                        'type': '端口扫描',
+                        'src_ip': ip, 'dst_ip': '多个目标', 'type': '端口扫描',
                         'detail': f'{ip} 在 {config.STATS_WINDOW}s 内探测了 {ports_count} 个不同端口'
                     })
                     self.conn_count[ip] = []
@@ -245,18 +256,14 @@ class AnomalyDetector:
                 threshold = mean + 3 * std
                 if count > threshold and count > 3:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '目标系统',
-                        'type': '暴力破解',
+                        'src_ip': ip, 'dst_ip': '目标系统', 'type': '暴力破解',
                         'detail': f'{ip} 在 {config.STATS_WINDOW}s 内失败登录 {count} 次 (基线均值{mean:.1f}, 阈值{threshold:.1f})'
                     })
                     self.fail_login_count[ip] = []
             else:
                 if count > config.BRUTE_FORCE_THRESHOLD:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '目标系统',
-                        'type': '暴力破解',
+                        'src_ip': ip, 'dst_ip': '目标系统', 'type': '暴力破解',
                         'detail': f'{ip} 在 {config.STATS_WINDOW}s 内失败登录 {count} 次'
                     })
                     self.fail_login_count[ip] = []
@@ -275,18 +282,14 @@ class AnomalyDetector:
                 threshold = mean + 3 * std
                 if outbound_count > threshold and outbound_count > 5:
                     anomalies.append({
-                        'src_ip': src_ip,
-                        'dst_ip': '外网多个IP',
-                        'type': '异常外联',
+                        'src_ip': src_ip, 'dst_ip': '外网多个IP', 'type': '异常外联',
                         'detail': f'{src_ip} 在 {config.STATS_WINDOW}s 内外联 {outbound_count} 个IP (基线均值{mean:.1f}, 阈值{threshold:.1f})'
                     })
                     self.external_connections[src_ip] = []
             else:
                 if outbound_count > 15:
                     anomalies.append({
-                        'src_ip': src_ip,
-                        'dst_ip': '外网多个IP',
-                        'type': '异常外联',
+                        'src_ip': src_ip, 'dst_ip': '外网多个IP', 'type': '异常外联',
                         'detail': f'{src_ip} 在 {config.STATS_WINDOW}s 内访问了 {outbound_count} 个不同外网IP'
                     })
                     self.external_connections[src_ip] = []
@@ -300,18 +303,14 @@ class AnomalyDetector:
                 threshold = mean + 3 * std
                 if len(unique_targets) > threshold and len(unique_targets) > 3:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '内网多个目标',
-                        'type': '内网横向扩散',
+                        'src_ip': ip, 'dst_ip': '内网多个目标', 'type': '内网横向扩散',
                         'detail': f'{ip} 在内网中访问了 {len(unique_targets)} 个不同的目标IP (基线均值{mean:.1f}, 阈值{threshold:.1f})'
                     })
                     self.lateral_movement[ip] = []
             else:
                 if len(unique_targets) > config.LATERAL_THRESHOLD:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '内网多个目标',
-                        'type': '内网横向扩散',
+                        'src_ip': ip, 'dst_ip': '内网多个目标', 'type': '内网横向扩散',
                         'detail': f'{ip} 在内网中访问了 {len(unique_targets)} 个不同的目标IP'
                     })
                     self.lateral_movement[ip] = []
@@ -321,12 +320,36 @@ class AnomalyDetector:
             for duration in durations:
                 if duration > config.SESSION_DURATION_THRESHOLD:
                     anomalies.append({
-                        'src_ip': ip,
-                        'dst_ip': '目标',
-                        'type': '会话时长异常',
+                        'src_ip': ip, 'dst_ip': '目标', 'type': '会话时长异常',
                         'detail': f'{ip} 存在会话时长 {duration/60:.1f} 分钟（超过阈值）'
                     })
             self.session_duration[ip] = []
+
+        # ========== [新增] 6. AI 模型异常检测 ==========
+        for ip, pkt_count in list(self.ip_packet_count.items()):
+            if pkt_count > 5:
+                # 使用 60 秒绝对冷却，防止高频攻击导致 AI 刷屏
+                if now - self.last_alert_time.get((ip, 'ai'), 0) > 60:
+                    connections = pkt_count
+                    
+                    # 动态适配队友的新 conn_count 数据结构
+                    recent_records = [item for item in self.conn_count.get(ip, []) if item[1] > cutoff]
+                    ports = len(set(port for port, t in recent_records))
+                    
+                    avg_traffic = self.ip_bytes_count[ip] / pkt_count
+                    sessions = self.ip_sessions.get(ip, 1)
+                    
+                    result = self.ai_detector.detect_anomaly(connections, ports, avg_traffic, avg_traffic, sessions)
+                    
+                    if result == "Anomaly":
+                        anomalies.append({
+                            'src_ip': ip, 
+                            'dst_ip': 'Multiple', 
+                            'type': 'AI智能分析异常', 
+                            'detail': f'[AI模型告警] 发现极端异常流量特征 (连接数:{connections}, 端口:{ports})'
+                        })
+                        self.last_alert_time[(ip, 'ai')] = now
+        # =================================================
 
         return anomalies
 
@@ -356,3 +379,8 @@ class AnomalyDetector:
         for key, start_time in list(self.session_start.items()):
             if now - start_time > config.SESSION_DURATION_THRESHOLD:
                 del self.session_start[key]
+
+        # ========== [新增] 定时清理 AI 特征计数器 ==========
+        self.ip_packet_count.clear()
+        self.ip_bytes_count.clear()
+        self.ip_sessions.clear()
