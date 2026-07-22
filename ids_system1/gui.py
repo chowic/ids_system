@@ -17,6 +17,7 @@ from PyQt5.QtCore import (
 from PyQt5.QtGui import QColor, QPainter, QPen, QFont
 
 from alert_manager import AlertManager
+from attack_chain import AttackChainAnalyzer, format_chain
 
 
 class AlertTableModel(QAbstractTableModel):
@@ -94,6 +95,10 @@ class AlertTableModel(QAbstractTableModel):
                 if self.filter_type == '横向扩散' and '横向' not in a['type']:
                     continue
                 if self.filter_type == '带宽异常' and '带宽' not in a['type']:
+                    continue
+                if self.filter_type == 'TLS恶意通信' and 'TLS' not in a['type']:
+                    continue
+                if self.filter_type == 'AI智能分析异常' and 'AI' not in a['type']:
                     continue
             if self.search_text:
                 search_lower = self.search_text.lower()
@@ -223,11 +228,12 @@ class SignatureDialog(QDialog):
 
 
 class CaptureThread(QThread):
-    def __init__(self, sig_detector, anomaly_detector, alert_manager):
+    def __init__(self, sig_detector, anomaly_detector, alert_manager, iface=None):
         super().__init__()
         self.sig_detector = sig_detector
         self.anomaly_detector = anomaly_detector
         self.alert_manager = alert_manager
+        self.iface = iface
         self.capture = None
 
     def run(self):
@@ -237,7 +243,7 @@ class CaptureThread(QThread):
             self.anomaly_detector,
             self.alert_manager
         )
-        self.capture.start()
+        self.capture.start(iface=self.iface)
 
     def stop(self):
         if self.capture:
@@ -270,7 +276,7 @@ class IDSGui(QMainWindow):
         self.alert_updated_signal.emit(index)
 
     def init_ui(self):
-        self.setWindowTitle('网络入侵检测系统 v2.0')
+        self.setWindowTitle('网络入侵检测系统 v3.0 (合并版)')
         self.setGeometry(100, 100, 1300, 800)
 
         central = QWidget()
@@ -290,6 +296,7 @@ class IDSGui(QMainWindow):
         self._init_alerts_tab()
         self._init_signature_tab()
         self._init_assets_tab()
+        self._init_attackchain_tab()
         self._init_settings_tab()
 
         self.statusBar = QStatusBar()
@@ -334,10 +341,19 @@ class IDSGui(QMainWindow):
         self.export_btn = QPushButton('📤 导出CSV')
         self.export_btn.clicked.connect(self.export_csv)
 
+        self.chain_btn = QPushButton('🔗 攻击链分析')
+        self.chain_btn.clicked.connect(self.show_attack_chain)
+        self.chain_btn.setEnabled(False)
+
+        self.learn_btn = QPushButton('🎓 基线学习')
+        self.learn_btn.clicked.connect(self.start_baseline_learning)
+
         toolbar.addWidget(self.start_btn)
         toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.clear_btn)
         toolbar.addWidget(self.export_btn)
+        toolbar.addWidget(self.chain_btn)
+        toolbar.addWidget(self.learn_btn)
         toolbar.addStretch()
 
         self.status_label = QLabel('⏸ 状态: 未启动')
@@ -359,6 +375,8 @@ class IDSGui(QMainWindow):
             ('scan', '扫描数', '🔍', '#e67e22', '0'),
             ('sql', 'SQL注入', '💉', '#c0392b', '0'),
             ('xss', 'XSS攻击', '📝', '#8e44ad', '0'),
+            ('tls', 'TLS恶意', '🔐', '#1abc9c', '0'),
+            ('ai', 'AI检测', '🤖', '#9b59b6', '0'),
             ('today_risk', '今日风险', '🔥', '#d35400', '0'),
         ]
 
@@ -406,7 +424,8 @@ class IDSGui(QMainWindow):
         self.filter_combo = QComboBox()
         self.filter_combo.addItems([
             '全部', 'SQL注入', 'XSS攻击', '端口扫描', '暴力破解',
-            '命令执行', '木马后门', '横向扩散', '带宽异常'
+            '命令执行', '木马后门', '横向扩散', '带宽异常',
+            'TLS恶意通信', 'AI智能分析异常'
         ])
         self.filter_combo.currentTextChanged.connect(self.on_filter_changed)
 
@@ -538,6 +557,28 @@ class IDSGui(QMainWindow):
 
         self.tabs.addTab(settings_widget, '⚙️ 设置')
 
+    def _init_attackchain_tab(self):
+        chain_widget = QWidget()
+        chain_layout = QVBoxLayout(chain_widget)
+
+        btn_layout = QHBoxLayout()
+        analyze_btn = QPushButton('🔍 分析攻击链')
+        analyze_btn.clicked.connect(self.show_attack_chain)
+        export_chain_btn = QPushButton('📤 导出攻击链报告')
+        export_chain_btn.clicked.connect(self.export_attack_chain)
+        btn_layout.addWidget(analyze_btn)
+        btn_layout.addWidget(export_chain_btn)
+        btn_layout.addStretch()
+        chain_layout.addLayout(btn_layout)
+
+        self.chain_text = QLabel('暂无攻击链数据，请先开始检测并产生告警。')
+        self.chain_text.setWordWrap(True)
+        self.chain_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.chain_text.setStyleSheet('font-family: Consolas, monospace; font-size: 12px; padding: 10px;')
+        chain_layout.addWidget(self.chain_text, 1)
+
+        self.tabs.addTab(chain_widget, '🔗 攻击链分析')
+
     def on_new_alert(self, alert):
         self.table_model.add_alert(alert)
         self.table_view.scrollToBottom()
@@ -567,6 +608,8 @@ class IDSGui(QMainWindow):
         self.stat_labels['scan'].setText(str(stats['scan']))
         self.stat_labels['sql'].setText(str(stats['sql']))
         self.stat_labels['xss'].setText(str(stats['xss']))
+        self.stat_labels['tls'].setText(str(stats['tls']))
+        self.stat_labels['ai'].setText(str(stats['ai']))
 
         risk = stats['today_risk']
         if risk >= 1000:
@@ -609,6 +652,7 @@ class IDSGui(QMainWindow):
         from packet_capture import PacketCapture
         from signature_detection import SignatureDetector
         from anomaly_detection import AnomalyDetector
+        from scapy.all import get_if_list
         import config
 
         if not os.path.exists(config.SIGNATURE_FILE):
@@ -628,11 +672,29 @@ class IDSGui(QMainWindow):
             QMessageBox.critical(self, '错误', f'加载特征库失败: {e}')
             return
 
+        # 网卡选择
+        try:
+            interfaces = get_if_list()
+            if not interfaces:
+                QMessageBox.critical(self, '错误', '未找到可用网卡，请检查网络适配器')
+                return
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'获取网卡列表失败: {e}')
+            return
+
+        from PyQt5.QtWidgets import QInputDialog
+        iface, ok = QInputDialog.getItem(
+            self, '选择网卡', '请选择要监听的网卡（建议选择当前正在使用的网络适配器）:',
+            interfaces, 0, False
+        )
+        if not ok:
+            return
+
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.status_label.setText('▶ 状态: 检测中...')
         self.status_label.setStyleSheet('font-weight: bold; color: #4CAF50; padding: 5px 10px;')
-        self.statusBar.showMessage('正在抓包检测...')
+        self.statusBar.showMessage(f'正在抓包检测... (网卡: {iface})')
 
         self.alert_manager.traffic_stats = {
             'total_packets': 0,
@@ -641,15 +703,17 @@ class IDSGui(QMainWindow):
         }
         self.alert_manager.realtime_stats = []
 
-        anomaly_detector = AnomalyDetector()
+        self.anomaly_detector = AnomalyDetector()
 
         self.capture_thread = CaptureThread(
             self.sig_detector,
-            anomaly_detector,
-            self.alert_manager
+            self.anomaly_detector,
+            self.alert_manager,
+            iface=iface
         )
         self.capture_thread.finished.connect(self.on_capture_stopped)
         self.capture_thread.start()
+        self.chain_btn.setEnabled(True)
 
     def stop_capture(self):
         if self.capture_thread:
@@ -661,6 +725,7 @@ class IDSGui(QMainWindow):
     def on_capture_stopped(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.chain_btn.setEnabled(False)
         self.status_label.setText('⏸ 状态: 已停止')
         self.status_label.setStyleSheet('font-weight: bold; color: #666; padding: 5px 10px;')
         self.statusBar.showMessage('检测已停止', 2000)
@@ -847,3 +912,69 @@ class IDSGui(QMainWindow):
             self.alert_manager.asset_manager.remove_asset(ip)
             self._load_assets_to_list()
             self.statusBar.showMessage(f'已删除资产: {ip}', 2000)
+
+    def show_attack_chain(self):
+        if len(self.alert_manager.alerts) == 0:
+            QMessageBox.information(self, '提示', '当前没有告警记录，无法分析攻击链')
+            return
+
+        analyzer = AttackChainAnalyzer(self.alert_manager)
+        summary = analyzer.get_summary()
+        chains = summary['chains']
+
+        if not chains:
+            self.chain_text.setText('暂无攻击链数据，请等待更多告警产生。')
+            return
+
+        lines = []
+        lines.append(f"攻击链分析结果 - 共发现 {summary['total']} 条攻击链")
+        lines.append(f"高危: {summary['high']} | 中危: {summary['medium']} | 低危: {summary['low']}")
+        lines.append("=" * 60)
+
+        for chain in chains:
+            lines.append(format_chain(chain))
+
+        self.chain_text.setText("\n".join(lines))
+        self.tabs.setCurrentIndex(4)
+        self.statusBar.showMessage(f'攻击链分析完成: {summary["total"]} 条链', 3000)
+
+    def export_attack_chain(self):
+        if len(self.alert_manager.alerts) == 0:
+            QMessageBox.information(self, '提示', '当前没有告警记录可导出')
+            return
+
+        default_name = f"attack_chain_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, '导出攻击链报告', default_name, '文本文件 (*.txt);;所有文件 (*)'
+        )
+        if not file_path:
+            return
+
+        try:
+            analyzer = AttackChainAnalyzer(self.alert_manager)
+            summary = analyzer.get_summary()
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(f"攻击链分析报告\n生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"共发现 {summary['total']} 条攻击链\n")
+                f.write(f"高危: {summary['high']} | 中危: {summary['medium']} | 低危: {summary['low']}\n")
+                f.write("=" * 60 + "\n")
+                for chain in summary['chains']:
+                    f.write(format_chain(chain) + "\n")
+            QMessageBox.information(self, '成功', f'攻击链报告已导出到:\n{file_path}')
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'导出失败: {e}')
+
+    def start_baseline_learning(self):
+        if not self.capture_thread or not self.capture_thread.capture:
+            QMessageBox.information(self, '提示', '请先开始检测，再进行基线学习')
+            return
+
+        reply = QMessageBox.question(
+            self, '确认基线学习',
+            '基线学习将持续30秒，期间不会产生告警。\n确定开始基线学习吗？',
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.capture_thread.capture.start_learning()
+            self.anomaly_detector.start_learning(30)
+            self.statusBar.showMessage('基线学习已启动，30秒内不告警...', 5000)

@@ -104,6 +104,10 @@ class AlertDeduplicator:
             base_type = "带宽异常"
         elif "会话" in alert_type:
             base_type = "会话时长异常"
+        elif "TLS" in alert_type:
+            base_type = "TLS恶意通信"
+        elif "AI" in alert_type:
+            base_type = "AI智能分析异常"
         return f"{src_ip}|{dst_ip}|{base_type}"
 
     def process_alert(self, alert):
@@ -239,6 +243,10 @@ class AlertManager:
             score += 10
         elif "会话" in alert_type:
             score += 5
+        elif "TLS" in alert_type:
+            score += 30
+        elif "AI" in alert_type:
+            score += 25
 
         if self.asset_importance_enabled:
             dst_score = self.asset_manager.get_importance_score(dst_ip)
@@ -299,6 +307,8 @@ class AlertManager:
         trojan = sum(1 for a in self.alerts if "木马" in a["type"] or "后门" in a["type"])
         lateral = sum(1 for a in self.alerts if "横向扩散" in a["type"])
         bandwidth = sum(1 for a in self.alerts if "带宽异常" in a["type"])
+        tls = sum(1 for a in self.alerts if "TLS" in a["type"])
+        ai = sum(1 for a in self.alerts if "AI" in a["type"])
 
         today = datetime.now().strftime("%Y-%m-%d")
         today_risk = sum(
@@ -321,6 +331,8 @@ class AlertManager:
             "bandwidth": bandwidth,
             "sql": sql_count,
             "xss": xss_count,
+            "tls": tls,
+            "ai": ai,
             "today_risk": today_risk,
         }
 
