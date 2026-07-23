@@ -27,3 +27,7 @@ LOG_FILE = "logs/alerts.log"
 BASELINE_LEARNING_TIME = 30   # 学习时长（秒）
 BASELINE_FILE = "data/baseline.json"
 USE_BASELINE = True           # 是否启用基线检测（若文件存在自动加载）
+
+# ===== TLS 恶意流量检测配置 =====
+MALICIOUS_SNIS = ["malicious-c2.com", "ngrok.io", "evil-domain.com"]
+MALICIOUS_JA3S = []

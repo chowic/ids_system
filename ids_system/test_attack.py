@@ -61,8 +61,8 @@ def test_scan():
     print("[✓] 端口扫描测试完成")
 
 def test_lateral_movement():
-    print("[*] 测试 内网横向扩散（访问11个不同内网IP）...")
-    internal_ips = [f"192.168.1.{i}" for i in range(2, 13)]  
+    print("[*] 测试 内网横向扩散（访问12个不同内网IP）...")
+    internal_ips = [f"192.168.1.{i}" for i in range(2, 14)]
     src_ip = '192.168.1.100'
     for i, dst_ip in enumerate(internal_ips):
         pkt = IP(src=src_ip, dst=dst_ip) / TCP(dport=445, flags="S")
@@ -80,28 +80,31 @@ def test_external():
     print("[✓] 异常外联测试完成")
 
 def test_bandwidth():
-    print("[*] 测试 带宽异常...")
-    large_payload = b"A" * 1450  
-    total_packets = 15000        
+    print("[*] 测试 带宽异常（400个包 * 1400字节）...")
+    large_payload = b"A" * 1400
+    total_packets = 400
     for i in range(total_packets):
         pkt = IP(dst="8.8.8.8") / TCP(dport=80, flags="PA") / Raw(load=large_payload)
         send(pkt, verbose=False)
-        time.sleep(0.001) 
+        time.sleep(0.001)
     print("[✓] 带宽测试包发送完毕")
 
 def test_session_duration():
-    print("[*] 测试 会话时长异常（阈值改为10秒）...")
+    print("[*] 测试 会话时长异常（临时将阈值改为2秒）...")
+    original_threshold = config.SESSION_DURATION_THRESHOLD
+    config.SESSION_DURATION_THRESHOLD = 2
     src_ip = "192.168.1.100"
     dst_ip = "8.8.8.8"
     dst_port = 80
     print("   发送 SYN 包...")
     pkt = IP(src=src_ip, dst=dst_ip) / TCP(dport=dst_port, flags="S")
     send(pkt, verbose=False)
-    print("   等待 15 秒...")
-    time.sleep(15)
+    print("   等待 5 秒（已超过2秒阈值）...")
+    time.sleep(5)
     print("   发送 FIN 包...")
     pkt = IP(src=src_ip, dst=dst_ip) / TCP(dport=dst_port, flags="F")
     send(pkt, verbose=False)
+    config.SESSION_DURATION_THRESHOLD = original_threshold
     print("[✓] 会话时长测试完成")
 
 def test_tls():
@@ -114,6 +117,18 @@ def test_tls():
         print("[✓] TLS 请求已发出 (握手已完成/响应超时)")
     except Exception as e:
         print(f"[!] 执行 curl 失败: {e}")
+
+def test_tls_malicious():
+    print("[*] 测试 TLS 恶意SNI检测（构造 ClientHello 发往 8.8.8.8）...")
+    target_domain = "ngrok.io"
+    fake_tls = (
+        b"\x16\x03\x01\x00\xba\x01\x00\x00\xb6\x03\x03"
+        b"\x00\x00\x00\x00\x00\x00\x02\x00\x2f\x01\x00\x00\x8b"
+        b"\x00\x00\x00\x0c\x00\x0a\x00\x00\x09" + target_domain.encode('utf-8')
+    )
+    pkt = IP(dst="8.8.8.8") / TCP(dport=443, flags="PA") / Raw(load=fake_tls)
+    send(pkt, verbose=False)
+    print("[✓] TLS 恶意 SNI 测试包发送完成 (8.8.8.8)")
 
 def test_all():
     print("\n" + "="*50)
@@ -148,7 +163,8 @@ def test_all():
     
     print("\n【9/9】TLS恶意域名检测 - ngrok.io")
     test_tls()
-    
+    test_tls_malicious()
+
     print("\n【8/9】异常行为 - 带宽异常 (耗时较长最后执行)")
     test_bandwidth()
     
@@ -171,13 +187,14 @@ if __name__ == "__main__":
     print("7. 异常外联 (异常行为)")
     print("8. 带宽异常 (异常行为)")
     print("9. 会话时长 (需修改配置，演示)")
-    print("10. TLS 恶意域名检测 (ngrok.io)")  
-    print("11. AI 智能异常流量诱骗 ( Isolation Forest )")  # <--- 加入了你的大招
+    print("10. TLS 恶意域名检测 (curl ngrok.io)")
+    print("11. TLS 恶意SNI构造包 (8.8.8.8)")
+    print("12. AI 智能异常流量诱骗 ( Isolation Forest )")
     print("0. 全部测试 (推荐)")
 
-    choice = input("\n请选择 (0-11): ")
+    choice = input("\n请选择 (0-12): ")
 
-    if choice != '9':  
+    if choice != '9':
         wait_for_learning()
 
     if choice == "1":
@@ -198,9 +215,11 @@ if __name__ == "__main__":
         test_bandwidth()
     elif choice == "9":
         test_session_duration()
-    elif choice == "10":      
+    elif choice == "10":
         test_tls()
-    elif choice == "11":      # 专属触发
+    elif choice == "11":
+        test_tls_malicious()
+    elif choice == "12":
         test_ai_attack()
     elif choice == "0":
         test_all()
