@@ -80,9 +80,9 @@ def test_external():
     print("[✓] 异常外联测试完成")
 
 def test_bandwidth():
-    print("[*] 测试 带宽异常（400个包 * 1400字节）...")
-    large_payload = b"A" * 1400
-    total_packets = 400
+    print("[*] 测试 带宽异常...")
+    large_payload = b"A" * 1450
+    total_packets = 15000
     for i in range(total_packets):
         pkt = IP(dst="8.8.8.8") / TCP(dport=80, flags="PA") / Raw(load=large_payload)
         send(pkt, verbose=False)
