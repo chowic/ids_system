@@ -124,7 +124,7 @@ class IDSGui(QMainWindow):
         self.init_ui()
 
     def init_ui(self):
-        self.setWindowTitle('网络入侵检测系统 v3.0')
+        self.setWindowTitle('轻量级混合型网络攻击检测系统')
         self.setGeometry(100, 100, 1400, 700) # 稍微加宽一点以容纳更多面板
 
         central = QWidget()
