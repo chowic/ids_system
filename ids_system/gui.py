@@ -322,7 +322,13 @@ class IDSGui(QMainWindow):
             guid = iface_info.get('guid', '')
             win_name = iface_info.get('win_name', '')
             display_name = f"{name} - {description}" if description else name
-            npf_name = f"\\Device\\NPF_{{{guid}}}" if guid else win_name
+            # 1. 强制剥离 guid 变量里原本自带的所有大括号
+            clean_guid = guid.replace('{', '').replace('}', '').strip() if guid else ''
+# 2. 重新拼接成有且仅有单层大括号的标准格式
+            if clean_guid:
+                npf_name = f"\\Device\\NPF_{{{clean_guid}}}"
+            else:
+                npf_name = win_name
             iface_map[display_name] = npf_name
             display_names.append(display_name)
 
