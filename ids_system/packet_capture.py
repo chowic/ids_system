@@ -201,7 +201,8 @@ class PacketCapture:
         print(f"[*] 开始抓包 (接口: {selected_iface}, 系统: {sys.platform})...")
         
         try:
-            sniff(iface=selected_iface, filter=filter_str, prn=self.packet_callback, store=0)
+            # 新增了 stop_filter 参数，当 self.running 变为 False 时，sniff 会安全退出循环
+            sniff(iface=selected_iface, filter=filter_str, prn=self.packet_callback, store=0, stop_filter=lambda x: not self.running)
         except KeyboardInterrupt:
             print("[*] 用户中断抓包")
         except Exception as e:
