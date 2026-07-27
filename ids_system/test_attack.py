@@ -4,6 +4,7 @@ import time
 import subprocess  
 import config   
 
+
 LEARNING_WAIT = config.BASELINE_LEARNING_TIME + 5
 
 def wait_for_learning():
@@ -177,53 +178,65 @@ if __name__ == "__main__":
     print("=== 攻击检测测试工具（增强版） ===")
     print("提示：请先启动 IDS 主程序（main.py）并点击「开始检测」")
     print("      本脚本将自动等待学习期（{}秒）结束后发送测试流量。".format(LEARNING_WAIT))
-    print("\n选择要测试的功能：")
-    print("1. SQL注入 (特征匹配)")
-    print("2. XSS (特征匹配)")
-    print("3. 命令执行 (特征匹配)")
-    print("4. 暴力破解 (异常行为)")
-    print("5. 端口扫描 (异常行为)")
-    print("6. 横向扩散 (异常行为)")
-    print("7. 异常外联 (异常行为)")
-    print("8. 带宽异常 (异常行为)")
-    print("9. 会话时长 (需修改配置，演示)")
-    print("10. TLS 恶意域名检测 (curl ngrok.io)")
-    print("11. TLS 恶意SNI构造包 (8.8.8.8)")
-    print("12. AI 智能异常流量诱骗 ( Isolation Forest )")
-    print("0. 全部测试 (推荐)")
+    
+    is_first_run = True  
 
-    choice = input("\n请选择 (0-12): ")
+    while True:          
+        print("\n选择要测试的功能：")
+        print("1. SQL注入 (特征匹配)")
+        print("2. XSS (特征匹配)")
+        print("3. 命令执行 (特征匹配)")
+        print("4. 暴力破解 (异常行为)")
+        print("5. 端口扫描 (异常行为)")
+        print("6. 横向扩散 (异常行为)")
+        print("7. 异常外联 (异常行为)")
+        print("8. 带宽异常 (异常行为)")
+        print("9. 会话时长 (需修改配置，演示)")
+        print("10. TLS 恶意域名检测 (curl ngrok.io)")
+        print("11. TLS 恶意SNI构造包 (8.8.8.8)")
+        print("12. AI 智能异常流量诱骗 ( Isolation Forest )")
+        print("0. 全部测试 (推荐)")
+        print("q. 退出测试") 
 
-    if choice != '9':
-        wait_for_learning()
+        choice = input("\n请选择 (0-12, 或输入 q 退出): ")
 
-    if choice == "1":
-        test_sql_injection()
-    elif choice == "2":
-        test_xss()
-    elif choice == "3":
-        test_cmd_exec()
-    elif choice == "4":
-        test_bruteforce()
-    elif choice == "5":
-        test_scan()
-    elif choice == "6":
-        test_lateral_movement()
-    elif choice == "7":
-        test_external()
-    elif choice == "8":
-        test_bandwidth()
-    elif choice == "9":
-        test_session_duration()
-    elif choice == "10":
-        test_tls()
-    elif choice == "11":
-        test_tls_malicious()
-    elif choice == "12":
-        test_ai_attack()
-    elif choice == "0":
-        test_all()
-    else:
-        print("无效选择")
+        if choice.lower() == 'q':
+            print("退出测试工具。")
+            break
 
-    print("\n请检查 IDS 界面是否有相应告警产生。")
+        # 【精准还原】：只要选的不是 9，并且是首次运行有效选项，才等待 35 秒
+        if choice != '9' and is_first_run and choice in [str(i) for i in range(13)]:
+            wait_for_learning()
+            is_first_run = False  
+
+        if choice == "1":
+            test_sql_injection()
+        elif choice == "2":
+            test_xss()
+        elif choice == "3":
+            test_cmd_exec()
+        elif choice == "4":
+            test_bruteforce()
+        elif choice == "5":
+            test_scan()
+        elif choice == "6":
+            test_lateral_movement()
+        elif choice == "7":
+            test_external()
+        elif choice == "8":
+            test_bandwidth()
+        elif choice == "9":
+            test_session_duration()
+        elif choice == "10":
+            test_tls()
+        elif choice == "11":
+            test_tls_malicious()
+        elif choice == "12":
+            test_ai_attack()
+        elif choice == "0":
+            test_all()
+        else:
+            print("无效选择，请重新输入！")
+
+        print("\n请检查 IDS 界面是否有相应告警产生。")
+        print("=" * 50)
