@@ -327,7 +327,7 @@ class AnomalyDetector:
 
         # ========== [新增] 6. AI 模型异常检测 ==========
         for ip, pkt_count in list(self.ip_packet_count.items()):
-            if pkt_count > 5:
+            if pkt_count > 50:  # <--- [修改] 将 5 改为 50，避免正常背景噪音频繁唤醒 AI
                 # 使用 60 秒绝对冷却，防止高频攻击导致 AI 刷屏
                 if now - self.last_alert_time.get((ip, 'ai'), 0) > 60:
                     connections = pkt_count
@@ -377,7 +377,7 @@ class AnomalyDetector:
                 self.lateral_movement[ip] = self.lateral_movement[ip][-100:]
 
         for key, start_time in list(self.session_start.items()):
-            if now - start_time > config.SESSION_DURATION_THRESHOLD:
+            if now - start_time > (config.SESSION_DURATION_THRESHOLD+30):
                 del self.session_start[key]
 
         # ========== [新增] 定时清理 AI 特征计数器 ==========
